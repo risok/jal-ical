@@ -10,6 +10,12 @@ import streamlit as st
 
 JST = ZoneInfo("Asia/Tokyo")
 
+MAX_INPUT_CHARS = 20000
+MAX_LINES = 2000
+MAX_FIELD_LEN = 200
+MAX_UPLOAD_BYTES = 200000
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+
 AIRPORT_CODE_MAP = {
     "東京(羽田)": "HND", "東京（羽田）": "HND", "羽田": "HND",
     "札幌(新千歳)": "CTS", "札幌（新千歳）": "CTS", "新千歳": "CTS",
@@ -71,6 +77,32 @@ class Flight:
 def normalize(text: str) -> str:
     return text.replace("\u3000", " ").replace("\r", "").strip()
 
+def sanitize_user_text(text: str) -> str:
+    if not text:
+        return ""
+    text = CONTROL_CHAR_RE.sub("", text)
+    if len(text) > MAX_INPUT_CHARS:
+        text = text[:MAX_INPUT_CHARS]
+    lines = text.split("\n")
+    if len(lines) > MAX_LINES:
+        lines = lines[:MAX_LINES]
+    return "\n".join(lines)
+
+def trim_field(value: str) -> str:
+    value = CONTROL_CHAR_RE.sub("", value).strip()
+    if len(value) > MAX_FIELD_LEN:
+        value = value[:MAX_FIELD_LEN]
+    return value
+
+def escape_ics_text(value: str) -> str:
+    value = trim_field(value)
+    return (
+        value.replace("\\", "\\\\")
+             .replace("\n", "\\n")
+             .replace(";", "\\;")
+             .replace(",", "\\,")
+    )
+
 def extract_location_and_time(segment: str):
     m = re.match(r'(.+?)(\d{1,2}:\d{2})発', segment.strip())
     if not m:
@@ -78,6 +110,12 @@ def extract_location_and_time(segment: str):
     name = m.group(1).strip()
     time = m.group(2)
     return name, time
+
+def is_valid_time(value: str) -> bool:
+    if not re.match(r"^\d{1,2}:\d{2}$", value or ""):
+        return False
+    h, m = value.split(":")
+    return 0 <= int(h) <= 23 and 0 <= int(m) <= 59
 
 def parse_flights_email(raw: str):
     """メールフォーマットのパーサー"""
@@ -115,10 +153,13 @@ def parse_flights_email(raw: str):
                 sn = re.search(r'座席番号：?([0-9A-Z]{1,4})', seat_line)
                 if sn:
                     seat_no = sn.group(1).strip()
-            if all([dep_name, dep_time, arr_name, arr_time]):
-                flights.append(Flight(year, month, day, str(flight_no),
-                                      dep_name, dep_time, arr_name, arr_time,
-                                      seat_class, seat_no))
+            if all([dep_name, dep_time, arr_name, arr_time]) and is_valid_time(dep_time) and is_valid_time(arr_time):
+                flights.append(Flight(
+                    year, month, day, trim_field(str(flight_no)),
+                    trim_field(dep_name), dep_time, trim_field(arr_name), arr_time,
+                    trim_field(seat_class) if seat_class else None,
+                    trim_field(seat_no) if seat_no else None
+                ))
             i += 1
         else:
             i += 1
@@ -184,10 +225,12 @@ def parse_flights_homepage(raw: str):
                 j += 1
             
             # フライト情報が揃っていれば追加
-            if all([dep_time, dep_name, arr_time, arr_name, flight_no]):
-                flights.append(Flight(year, month, day, flight_no,
-                                      dep_name, dep_time, arr_name, arr_time,
-                                      seat_class, None))
+            if all([dep_time, dep_name, arr_time, arr_name, flight_no]) and is_valid_time(dep_time) and is_valid_time(arr_time):
+                flights.append(Flight(
+                    year, month, day, trim_field(flight_no),
+                    trim_field(dep_name), dep_time, trim_field(arr_name), arr_time,
+                    trim_field(seat_class) if seat_class else None, None
+                ))
                 i = j - 1
             else:
                 i += 1
@@ -198,6 +241,7 @@ def parse_flights_homepage(raw: str):
 
 def parse_flights(raw: str):
     """両方のフォーマットを試してパース"""
+    raw = sanitize_user_text(raw)
     # メールフォーマットを試す
     flights = parse_flights_email(raw)
     
@@ -215,8 +259,8 @@ def to_ics(flight: Flight) -> str:
     dep_code = flight.dep_code()
     arr_code = flight.arr_code()
     def short(s): return s if len(s) <= 8 else s[:8]
-    summary = f"JAL{flight.flight_no} {short(dep_code)}->{short(arr_code)}"
-    location = f"{flight.dep_name} -> {flight.arr_name}"
+    summary = escape_ics_text(f"JAL{flight.flight_no} {short(dep_code)}->{short(arr_code)}")
+    location = escape_ics_text(f"{flight.dep_name} -> {flight.arr_name}")
     desc_parts = [
         f"Flight: JAL{flight.flight_no}",
         f"From: {flight.dep_name} ({dep_code}) {flight.dep_time}",
@@ -224,7 +268,7 @@ def to_ics(flight: Flight) -> str:
     ]
     if flight.seat_class or flight.seat_no:
         desc_parts.append(f"Seat: {flight.seat_class or ''} {flight.seat_no or ''}".strip())
-    description = "\\n".join(desc_parts)
+    description = escape_ics_text("\\n".join(desc_parts))
     uid = f"{uuid.uuid4()}@jal-parser"
     return (
         "BEGIN:VEVENT\n"
@@ -326,8 +370,11 @@ with col_opts:
 
 uploaded = st.file_uploader("テキストファイル読込", type=["txt"])
 if uploaded:
-    text_input = uploaded.read().decode("utf-8", errors="ignore")
-    st.session_state["text_input"] = text_input
+    if uploaded.size and uploaded.size > MAX_UPLOAD_BYTES:
+        st.error("ファイルサイズが大きすぎます。")
+    else:
+        text_input = uploaded.read().decode("utf-8", errors="ignore")
+        st.session_state["text_input"] = sanitize_user_text(text_input)
 
 run = st.button("解析する")
 if run:
