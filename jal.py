@@ -337,6 +337,28 @@ FNMGMS
 if "text_input" not in st.session_state:
     st.session_state["text_input"] = ""
 
+def set_text_input(value: str):
+    st.session_state["text_input"] = sanitize_user_text(value or "")
+
+def load_sample_email():
+    set_text_input(SAMPLE)
+
+def load_sample_hp():
+    set_text_input(SAMPLE_HOMEPAGE)
+
+def reset_text_input():
+    set_text_input("")
+
+def handle_upload():
+    uploaded_file = st.session_state.get("uploader")
+    if not uploaded_file:
+        return
+    if uploaded_file.size and uploaded_file.size > MAX_UPLOAD_BYTES:
+        st.error("ファイルサイズが大きすぎます。")
+        return
+    text_input = uploaded_file.read().decode("utf-8", errors="ignore")
+    set_text_input(text_input)
+
 st.set_page_config(page_title="JAL フライト → ICS", page_icon="✈")
 
 st.title("JAL フライト本文 → ICS 生成")
@@ -352,29 +374,21 @@ with col_in:
         "フライト情報本文を貼り付け", 
         height=300, 
         placeholder="メール本文やホームページからコピーした内容を貼り付け...",
-        value=st.session_state["text_input"],
-        key="textarea"
+        key="text_input"
     )
-    st.session_state["text_input"] = text_input
     
 with col_opts:
-    if st.button("サンプル読込(メール)", use_container_width=True):
-        st.session_state["text_input"] = SAMPLE
-        st.rerun()
-    if st.button("サンプル読込(HP)", use_container_width=True):
-        st.session_state["text_input"] = SAMPLE_HOMEPAGE
-        st.rerun()
-    if st.session_state["text_input"] and st.button("リセット", use_container_width=True, type="secondary"):
-        st.session_state["text_input"] = ""
-        st.rerun()
+    st.button("サンプル読込(メール)", use_container_width=True, on_click=load_sample_email)
+    st.button("サンプル読込(HP)", use_container_width=True, on_click=load_sample_hp)
+    if st.session_state["text_input"]:
+        st.button("リセット", use_container_width=True, type="secondary", on_click=reset_text_input)
 
-uploaded = st.file_uploader("テキストファイル読込", type=["txt"])
-if uploaded:
-    if uploaded.size and uploaded.size > MAX_UPLOAD_BYTES:
-        st.error("ファイルサイズが大きすぎます。")
-    else:
-        text_input = uploaded.read().decode("utf-8", errors="ignore")
-        st.session_state["text_input"] = sanitize_user_text(text_input)
+st.file_uploader(
+    "テキストファイル読込",
+    type=["txt"],
+    key="uploader",
+    on_change=handle_upload
+)
 
 run = st.button("解析する")
 if run:
